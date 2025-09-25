@@ -53,7 +53,7 @@
     </div>
 
     <!-- Игровой canvas -->
-    <canvas id="canvas" class="emscripten" tabindex="0" width="1px" height="1px"
+    <canvas id="canvas" class="emscripten" width="1px" height="1px"
         oncontextmenu="event.preventDefault()"></canvas>
 
     <!-- Кнопка Leaderboard -->
@@ -62,7 +62,6 @@
     </div>
 
     <div id="html"></div>
-
     <div id="crt" class="bottomright">
         <!-- твои элементы system, box, iframe и т.д. -->
     </div>
@@ -89,10 +88,7 @@
             } else {
                 alert("Name not entered!");
             }
-
-            // Возвращаем фокус на canvas после prompt
-            const canvas = document.getElementById("canvas");
-            if (canvas && canvas.focus) canvas.focus();
+            // Никаких операций с canvas — чтобы не ломать pygbag
         });
     </script>
 
@@ -585,4 +581,5 @@ frameborder="1"
 
 </body>
 </html>
+
 
