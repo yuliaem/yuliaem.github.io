@@ -168,10 +168,10 @@ async def custom_site():
     if not platform.window.MM.UME:
 
         # now make a prompt
-        fnt = pygame.sysfont.SysFont("freesans",  uy(60) )
+        fnt = pygame.sysfont.SysFont("freesans",  uy(50) )
         prompt = fnt.render("Ready to start! Please click/touch page", True, "blue")
         pg_bar(track.len)
-        screen.blit(prompt, ( marginx+ ux(80), marginy + uy(30) ) )
+        screen.blit(prompt, ( marginx+ ux(80), marginy + uy(20) ) )
         compose()
         print("""
         * Waiting for media user engagement : please click/touch page *
@@ -487,6 +487,7 @@ frameborder="1"
 
 </body>
 </html>
+
 
 
 
