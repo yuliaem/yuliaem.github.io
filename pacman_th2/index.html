@@ -53,11 +53,8 @@
     </div>
 
     <!-- Игровой canvas -->
-    <canvas class="emscripten" id="canvas"
-        width="1px"
-        height="1px"
-        oncontextmenu="event.preventDefault()" tabindex="1">
-    </canvas>
+    <canvas id="canvas" class="emscripten" tabindex="0" width="1px" height="1px"
+        oncontextmenu="event.preventDefault()"></canvas>
 
     <!-- Кнопка Leaderboard -->
     <div id="leaderboardContainer">
@@ -92,6 +89,10 @@
             } else {
                 alert("Name not entered!");
             }
+
+            // Возвращаем фокус на canvas после prompt
+            const canvas = document.getElementById("canvas");
+            if (canvas && canvas.focus) canvas.focus();
         });
     </script>
 
@@ -584,3 +585,4 @@ frameborder="1"
 
 </body>
 </html>
+
