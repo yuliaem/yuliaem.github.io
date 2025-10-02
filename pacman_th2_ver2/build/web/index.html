@@ -166,29 +166,19 @@ async def custom_site():
 
     # test/wait if user media interaction required
 
-	fnt = pygame.sysfont.SysFont("freesans", uy(80))
-	prompt = fnt.render("Check console for input!", True, "blue")
-	pg_bar(track.len)
-	screen.blit(prompt, (marginx + ux(80), marginy - uy(10)))
-	compose()
+	if not platform.window.MM.UME:
 
-	print("""
-		* Please enter your name and email address to start *
-	""")
-
-	# Get input from console
-	name_text = input("Enter your name: ")
-	email_text = input("Enter your email: ")
-
-	# Store user data
-	user_data = {
-		"name": name_text,
-		"email": email_text,
-		"score": 0,
-		"ts": int(time.time())
-	}
-
-	print(f"Welcome {name_text}! Starting game...")
+        # now make a prompt
+        fnt = pygame.sysfont.SysFont("freesans",  uy(80) )
+        prompt = fnt.render("Ready to start !", True, "blue")
+        pg_bar(track.len)
+        screen.blit(prompt, ( marginx+ ux(80), marginy - uy(10) ) )
+        compose()
+        print("""
+        * Waiting for media user engagement : please click/touch page *
+    """)
+        while not platform.window.MM.UME:
+            await asyncio.sleep(.1)
 
     # cleanup
     screen.fill( (0,0,0,0) )
