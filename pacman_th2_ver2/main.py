@@ -7,14 +7,14 @@ import numpy as np
 import math
 import json
 import sys
+import threading
 
 IS_WEB = (sys.platform == "emscripten")
-SCRIPT_URL = "https://script.google.com/macros/s/AKfycbyK1ETQnDlNnVYI3A7vyWD3SNS8ucRbmBCjh2KvZvAfdmSAuInkPqSLTp9mOA3sSV3K7w/exec"
-#"https://script.google.com/macros/s/AKfycby2BG5KVSoEd-HzY19OcBkfDlUiTcpGtuad5qUlVE6OaA3oO0pycbNjYe9JzE5JDsWv/exec"
+SCRIPT_URL = "http://localhost:9000"
 
 BASETILEWIDTH = 16
 BASETILEHEIGHT = 16
-DEATH = 1
+DEATH = 3
 
 GHOST_SPEED = 50 #50
 PACMAN_SPEED = 100 #2 * GHOST_SPEED
@@ -71,41 +71,566 @@ READYTXT = 2
 PAUSETXT = 3
 GAMEOVERTXT = 4
 
+class VirtualKeyboard:
+    def __init__(self, surface, input_boxes):
+        self.surface = surface
+        self.input_boxes = input_boxes
+        self.active_input = 0
+        self.visible = False
+        self.shift_active = False
+        
+        # Keyboard layouts
+        self.rows_lower = [
+            ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+            ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+            ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', '@'],
+            ['z', 'x', 'c', 'v', 'b', 'n', 'm', '.', '-', '_'],
+            ['shift', 'space', 'backspace', 'enter', 'switch']
+        ]
+        
+        self.rows_upper = [
+            ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')'],
+            ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
+            ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', '@'],
+            ['Z', 'X', 'C', 'V', 'B', 'N', 'M', '.', '-', '_'],
+            ['shift', 'space', 'backspace', 'enter', 'switch']
+        ]
+        
+        self.rows = self.rows_lower
+        
+        # Keyboard dimensions - adjusted for better spacing
+        self.key_width = SCREENWIDTH // 14  # Smaller for more keys
+        self.special_key_width = SCREENWIDTH // 7  # Wider for special keys
+        self.key_height = 40
+        self.key_margin = 1  # Reduced margin
+        self.start_y = SCREENHEIGHT // 2 + 150
+        
+        # Colors
+        self.key_color = (255, 255, 255)
+        self.key_active_color = (150, 150, 150)
+        self.text_color = BLACK
+        self.special_key_color = (224, 224, 224)
+        self.shift_active_color = (103, 181, 252)
+        
+        self.font = pygame.font.Font("PressStart2P-Regular.ttf", 10)
+        self.small_font = pygame.font.Font("PressStart2P-Regular.ttf", 8)  # Smaller font for long labels
+        
+    def toggle_shift(self):
+        self.shift_active = not self.shift_active
+        self.rows = self.rows_upper if self.shift_active else self.rows_lower
+        
+    def toggle(self):
+        self.visible = not self.visible
+        if self.visible:
+            self.activate_input(0)
+            self.shift_active = False
+            self.rows = self.rows_lower
+    
+    def activate_input(self, index):
+        if 0 <= index < len(self.input_boxes):
+            self.active_input = index
+            for i, box in enumerate(self.input_boxes):
+                box.active = (i == index)
+                box.color = box.color_active if (i == index) else box.color_inactive
+    
+    def handle_event(self, event):
+        if not self.visible:
+            return None
+            
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            pos = event.pos
+            
+            # Check if click is on close button
+            close_rect = pygame.Rect(SCREENWIDTH - 60, self.start_y - 50, 50, 20)
+            if close_rect.collidepoint(pos):
+                self.visible = False
+                return "keyboard_closed"
+            
+            if pos[1] >= self.start_y:
+                key = self.get_key_at_position(pos)
+                if key:
+                    result = self.handle_key_press(key)
+                    if result == "shift_toggled":
+                        return "key_pressed"
+                    elif result == "submit":
+                        return "submit"
+                    else:
+                        return "key_pressed"
+            
+            for i, box in enumerate(self.input_boxes):
+                if box.rect.collidepoint(pos):
+                    self.activate_input(i)
+                    return "input_selected"
+        
+        return None
+    
+    def get_key_at_position(self, pos):
+        x, y = pos
+        current_y = self.start_y
+        
+        for row_idx, row in enumerate(self.rows):
+            row_width = self.calculate_row_width(row)
+            start_x = (SCREENWIDTH - row_width) // 2
+            
+            current_x = start_x
+            for key_idx, key in enumerate(row):
+                key_width = self.get_key_width(key)
+                key_rect = pygame.Rect(current_x, current_y, key_width, self.key_height)
+                
+                if key_rect.collidepoint(x, y):
+                    return key
+                
+                current_x += key_width + self.key_margin
+            
+            current_y += self.key_height + self.key_margin
+        
+        return None
+    
+    def calculate_row_width(self, row):
+        """Calculate total width of a row including margins"""
+        total_width = 0
+        for key in row:
+            total_width += self.get_key_width(key) + self.key_margin
+        return total_width - self.key_margin  # Remove last margin
+    
+    def get_key_width(self, key):
+        """Get width for specific key type"""
+        if key in ['shift', 'space', 'backspace', 'enter', 'switch']:
+            return self.special_key_width
+        else:
+            return self.key_width
+    
+    def handle_key_press(self, key):
+        active_box = self.input_boxes[self.active_input]
+        
+        if key == 'backspace':
+            if active_box.text:
+                active_box.text = active_box.text[:-1]
+        elif key == 'space':
+            active_box.text += ' '
+        elif key == 'enter':
+            if self.active_input < len(self.input_boxes) - 1:
+                self.activate_input(self.active_input + 1)
+            else:
+                return "submit"
+        elif key == 'switch':
+            next_index = (self.active_input + 1) % len(self.input_boxes)
+            self.activate_input(next_index)
+        elif key == 'shift':
+            self.toggle_shift()
+            return "shift_toggled"
+        else:
+            if len(active_box.text) < 50:
+                active_box.text += key
+                if self.shift_active and key.isalpha():
+                    self.toggle_shift()
+        
+        active_box.txt_surface = active_box.font.render(active_box.text, True, WHITE)
+        return None
+    
+    def draw(self):
+        if not self.visible:
+            return
+            
+        # Draw semi-transparent background
+        keyboard_area_height = SCREENHEIGHT - self.start_y + 50
+        keyboard_bg = pygame.Surface((SCREENWIDTH, keyboard_area_height))
+        keyboard_bg.set_alpha(220)
+        keyboard_bg.fill(BLACK)
+        self.surface.blit(keyboard_bg, (0, self.start_y - 20))
+        
+        # Draw separator line
+        pygame.draw.line(self.surface, WHITE, (0, self.start_y - 25), (SCREENWIDTH, self.start_y - 25), 2)
+        
+        # Draw keyboard title - moved to avoid overlap
+        title_font = pygame.font.Font("PressStart2P-Regular.ttf", 10)
+        title = title_font.render("VIRTUAL KEYBOARD", True, YELLOW)
+        self.surface.blit(title, (SCREENWIDTH//2 - title.get_width()//2, self.start_y - 15))
+        
+        # Draw active input indicator - moved left
+        active_labels = ["NAME", "EMAIL"]
+        indicator_text = f"ACTIVE: {active_labels[self.active_input]}"
+        indicator = self.small_font.render(indicator_text, True, GREEN)
+        self.surface.blit(indicator, (10, self.start_y - 15))
+        
+        # Draw shift state indicator - moved right
+        shift_text = "SHIFT: ON" if self.shift_active else "SHIFT: OFF"
+        shift_color = self.shift_active_color if self.shift_active else (200, 200, 200)
+        shift_indicator = self.small_font.render(shift_text, True, shift_color)
+        self.surface.blit(shift_indicator, (SCREENWIDTH - shift_indicator.get_width() - 10, self.start_y - 15))
+        
+        current_y = self.start_y
+        
+        for row_idx, row in enumerate(self.rows):
+            row_width = self.calculate_row_width(row)
+            start_x = (SCREENWIDTH - row_width) // 2
+            
+            current_x = start_x
+            for key_idx, key in enumerate(row):
+                key_width = self.get_key_width(key)
+                key_rect = pygame.Rect(current_x, current_y, key_width, self.key_height)
+                
+                # Choose key color
+                if key in ['backspace', 'enter', 'switch', 'space']:
+                    key_color = self.special_key_color
+                elif key == 'shift':
+                    key_color = self.shift_active_color if self.shift_active else self.special_key_color
+                else:
+                    key_color = self.key_color
+                
+                # Draw key background
+                pygame.draw.rect(self.surface, key_color, key_rect, border_radius=3)
+                pygame.draw.rect(self.surface, WHITE, key_rect, 1, border_radius=3)
+                
+                # Draw key label with appropriate font
+                if key == 'space':
+                    label = 'SPACE'
+                    font_to_use = self.small_font
+                elif key == 'backspace':
+                    label = 'DEL'
+                    font_to_use = self.small_font
+                elif key == 'enter':
+                    label = 'ENTER'
+                    font_to_use = self.small_font
+                elif key == 'switch':
+                    label = 'SWITCH'
+                    font_to_use = self.small_font
+                elif key == 'shift':
+                    label = 'SHIFT'
+                    font_to_use = self.small_font
+                else:
+                    label = key
+                    font_to_use = self.font
+                
+                key_text = font_to_use.render(label, True, self.text_color)
+                text_x = key_rect.centerx - key_text.get_width() // 2
+                text_y = key_rect.centery - key_text.get_height() // 2
+                self.surface.blit(key_text, (text_x, text_y))
+                
+                current_x += key_width + self.key_margin
+            
+            current_y += self.key_height + self.key_margin
+        
+        # Draw close button
+        close_rect = pygame.Rect(SCREENWIDTH - 60, self.start_y - 50, 50, 20)
+        pygame.draw.rect(self.surface, RED, close_rect, border_radius=3)
+        pygame.draw.rect(self.surface, WHITE, close_rect, 1, border_radius=3)
+        close_text = self.small_font.render("CLOSE", True, WHITE)
+        self.surface.blit(close_text, (close_rect.centerx - close_text.get_width()//2, 
+                                     close_rect.centery - close_text.get_height()//2))
+
+
+class StartupScreen:
+    def __init__(self, surface):
+        self.surface = surface
+        self.active = True
+        self.font_large = pygame.font.Font("PressStart2P-Regular.ttf", 18)
+        self.font_medium = pygame.font.Font("PressStart2P-Regular.ttf", 11)
+        self.font_small = pygame.font.Font("PressStart2P-Regular.ttf", 10)
+        self.font_extrasmall = pygame.font.Font("PressStart2P-Regular.ttf", 8)  # Smaller for better fit
+
+        self.rect = pygame.Rect(20, 150, 320, 200)
+
+        label_width = 50  
+        field_width = 335  
+        start_x = self.rect.x + 20
+        start_y = self.rect.y + 50
+
+        self.name_label_rect = pygame.Rect(start_x, start_y, label_width, 32)
+        self.name_input = InputBox(start_x + label_width, start_y, field_width, 32)
+        
+        self.email_label_rect = pygame.Rect(start_x, start_y + 50, label_width, 32)
+        self.email_input = InputBox(start_x + label_width, start_y + 50, field_width, 32)
+
+        self.start_btn = pygame.Rect(self.rect.x + 70, self.rect.y + 150, 150, 32)
+        self.keyboard_btn = pygame.Rect(self.rect.x + 240, self.rect.y + 150, 100, 32)
+                
+        self.active_field = "name"
+        
+        self.name_error = False
+        self.email_error = False
+        self.error_message = ""
+        self.error_timer = 0
+        self.error_duration = 3.0
+        
+        self.keyboard = VirtualKeyboard(surface, [self.name_input, self.email_input])
+
+    def handle_event(self, event):
+        if not self.active:
+            return None
+            
+        if self.keyboard.visible:
+            result = self.keyboard.handle_event(event)
+            if result == "submit":
+                if self.validate_input():
+                    self.active = False
+                    return {
+                        "name": self.name_input.text.strip(),
+                        "email": self.email_input.text.strip()
+                    }
+            elif result == "keyboard_closed":
+                return None
+            elif result == "input_selected":
+                self.update_field_colors()
+                return None
+            elif result == "key_pressed":
+                return None
+        
+        if event.type in [pygame.MOUSEBUTTONDOWN, pygame.KEYDOWN]:
+            self.name_error = False
+            self.email_error = False
+            self.error_message = ""
+            self.update_field_colors()
+            
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if self.name_input.rect.collidepoint(event.pos):
+                self.name_input.active = True
+                self.email_input.active = False
+                self.active_field = "name"
+                self.keyboard.activate_input(0)
+            elif self.email_input.rect.collidepoint(event.pos):
+                self.email_input.active = True
+                self.name_input.active = False
+                self.active_field = "email"
+                self.keyboard.activate_input(1)
+            elif self.start_btn.collidepoint(event.pos):
+                if self.validate_input():
+                    self.active = False
+                    return {
+                        "name": self.name_input.text.strip(),
+                        "email": self.email_input.text.strip()
+                    }
+            elif self.keyboard_btn.collidepoint(event.pos):
+                self.keyboard.toggle()
+            
+            self.update_field_colors()
+
+        if event.type == pygame.KEYDOWN:
+            if self.name_input.active:
+                result = self.name_input.handle_event(event)
+                if result:
+                    self.name_input.active = False
+                    self.email_input.active = True
+                    self.active_field = "email"
+                    self.keyboard.activate_input(1)
+                    self.update_field_colors()
+            elif self.email_input.active:
+                result = self.email_input.handle_event(event)
+                if result and event.key == pygame.K_RETURN:
+                    if self.validate_input():
+                        self.active = False
+                        return {
+                            "name": self.name_input.text.strip(),
+                            "email": self.email_input.text.strip()
+                        }
+        
+        return None
+
+    def validate_input(self):
+        name_valid = bool(self.name_input.text.strip())
+        email_valid = bool(self.email_input.text.strip())
+        
+        if not name_valid and not email_valid:
+            self.name_error = True
+            self.email_error = True
+            self.error_message = "Please enter both name and email"
+            self.error_timer = self.error_duration
+            return False
+        elif not name_valid:
+            self.name_error = True
+            self.error_message = "Please enter your name"
+            self.error_timer = self.error_duration
+            return False
+        elif not email_valid:
+            self.email_error = True
+            self.error_message = "Please enter your email"
+            self.error_timer = self.error_duration
+            return False
+            
+        return True
+
+    def update_field_colors(self):
+        if self.name_error:
+            self.name_input.color = pygame.Color("red")
+        else:
+            self.name_input.color = self.name_input.color_active if self.name_input.active else self.name_input.color_inactive
+            
+        if self.email_error:
+            self.email_input.color = pygame.Color("red")
+        else:
+            self.email_input.color = self.email_input.color_active if self.email_input.active else self.email_input.color_inactive
+
+    def update(self, dt):
+        if self.error_timer > 0:
+            self.error_timer -= dt
+            if self.error_timer <= 0:
+                self.error_message = ""
+                self.name_error = False
+                self.email_error = False
+                self.update_field_colors()
+
+    def draw(self):
+        if not self.active:
+            return
+            
+        overlay = pygame.Surface(SCREENSIZE, pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 200))
+        self.surface.blit(overlay, (0, 0))
+
+        title = self.font_large.render("PACMAN GAME WITH TH2", True, YELLOW)
+        subtitle = self.font_small.render("Enter your details to start", True, WHITE)
+        
+        self.surface.blit(title, (SCREENWIDTH//2 - title.get_width()//2, 80))
+        self.surface.blit(subtitle, (SCREENWIDTH//2 - subtitle.get_width()//2, 130))
+
+        name_label = self.font_medium.render("Name:", True, WHITE)
+        email_label = self.font_medium.render("Email:", True, WHITE)
+
+        self.surface.blit(name_label, (self.name_label_rect.right - name_label.get_width() - 5, 
+                                   self.name_label_rect.y + 10))
+        self.surface.blit(email_label, (self.email_label_rect.right - email_label.get_width() - 5, 
+                                    self.email_label_rect.y + 10))
+
+        self.name_input.draw(self.surface)
+        self.email_input.draw(self.surface)
+
+        pygame.draw.rect(self.surface, (103, 181, 252), self.start_btn, border_radius=8)
+        start_text = self.font_medium.render("START", True, BLACK)
+        self.surface.blit(start_text, (self.start_btn.centerx - start_text.get_width()//2, 
+                                     self.start_btn.centery - start_text.get_height()//2))
+
+        pygame.draw.rect(self.surface, (181, 103, 252), self.keyboard_btn, border_radius=8)
+        keyboard_text = self.font_medium.render("KEYBOARD", True, BLACK)
+        self.surface.blit(keyboard_text, (self.keyboard_btn.centerx - keyboard_text.get_width()//2, 
+                                        self.keyboard_btn.centery - keyboard_text.get_height()//2))
+
+        if self.error_message and self.error_timer > 0:
+            error_color = (255, 100, 100)
+            error_text = self.font_small.render(self.error_message, True, error_color)
+            self.surface.blit(error_text, (SCREENWIDTH//2 - error_text.get_width()//2, self.rect.y + 200))
+            
+            hint_text = self.font_small.render("Click on fields to edit", True, (255, 255, 100))
+            self.surface.blit(hint_text, (SCREENWIDTH//2 - hint_text.get_width()//2, self.rect.y + 220))
+        else:
+            if self.keyboard.visible:
+                text = "Using Virtual Keyboard:\nTap CLOSE when done"
+            else:
+                text = "Press KEYBOARD for virtual keyboard"
+            
+            lines = text.split('\n')
+            rendered_lines = [self.font_small.render(line, True, (103, 181, 252)) for line in lines]
+            x = SCREENWIDTH // 2 - rendered_lines[0].get_width() // 2
+            y = self.rect.y + 200
+            for line in rendered_lines:
+                self.surface.blit(line, (x, y))
+                y += 2 * line.get_height()
+
+        self.keyboard.draw()
+
+
 class InputBox:
-    def __init__(self, x, y, w, h, text=''):
+    def __init__(self, x, y, w, h, text=""):
         self.rect = pygame.Rect(x, y, w, h)
-        self.color_inactive = pygame.Color('gray')
-        self.color_active = pygame.Color('dodgerblue2')
+        self.color_inactive = pygame.Color("gray")
+        self.color_active = pygame.Color("dodgerblue2")
+        self.color_error = pygame.Color("red")
         self.color = self.color_inactive
         self.text = text
-        self.font = pygame.font.Font("PressStart2P-Regular.ttf", 18)
-        self.txt_surface = self.font.render(text, True, self.color)
+        self.font = pygame.font.Font("PressStart2P-Regular.ttf", 9)
+        self.txt_surface = self.font.render(text, True, (255, 255, 255))
         self.active = False
 
     def handle_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN:
-            # toggle active if clicked
             if self.rect.collidepoint(event.pos):
                 self.active = not self.active
             else:
                 self.active = False
-            self.color = self.color_active if self.active else self.color_inactive
-        if event.type == pygame.KEYDOWN:
-            if self.active:
-                if event.key == pygame.K_RETURN:
-                    return self.text  # submit
-                elif event.key == pygame.K_BACKSPACE:
-                    self.text = self.text[:-1]
-                else:
-                    self.text += event.unicode
-                self.txt_surface = self.font.render(self.text, True, self.color)
+            # Color will be updated by parent class based on error state
+            return None
+
+        if event.type == pygame.KEYDOWN and self.active:
+            if event.key == pygame.K_RETURN:
+                return self.text
+            elif event.key == pygame.K_BACKSPACE:
+                self.text = self.text[:-1]
+            else:
+                self.text += event.unicode
+            self.txt_surface = self.font.render(self.text, True, (255, 255, 255))
+            return None
         return None
 
     def draw(self, screen):
-        # draw text
-        screen.blit(self.txt_surface, (self.rect.x+5, self.rect.y+5))
-        # draw rect
+        screen.blit(self.txt_surface, (self.rect.x + 5, self.rect.y + 12))
         pygame.draw.rect(screen, self.color, self.rect, 2)
+
+
+class InputForm:
+    def __init__(self, surface):
+        self.surface = surface
+        self.visible = False
+        self.font = pygame.font.Font("PressStart2P-Regular.ttf", 15)
+        self.label_font = pygame.font.Font("PressStart2P-Regular.ttf", 15)
+        self.rect = pygame.Rect(80, 200, 320, 200)
+
+        
+        label_width = 80  
+        field_width = 180  
+        start_x = self.rect.x + 20
+        start_y = self.rect.y + 50
+
+        self.name_label_rect = pygame.Rect(start_x, start_y, label_width, 32)
+        self.name_box = InputBox(start_x + label_width, start_y, field_width, 32)
+        
+        self.email_label_rect = pygame.Rect(start_x, start_y + 50, label_width, 32)
+        self.email_box = InputBox(start_x + label_width, start_y + 50, field_width, 32)
+
+        self.enter_btn = pygame.Rect(self.rect.x + 100, self.rect.y + 150, 120, 32)
+
+    def open(self):
+        self.visible = True
+        self.name_box.text = ""
+        self.email_box.text = ""
+        self.name_box.txt_surface = self.name_box.font.render("", True, (255, 255, 255))
+        self.email_box.txt_surface = self.email_box.font.render("", True, (255, 255, 255))
+
+    def handle_event(self, event):
+        if not self.visible:
+            return
+
+        self.name_box.handle_event(event)
+        self.email_box.handle_event(event)
+
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if self.enter_btn.collidepoint(event.pos):
+                print("👉 Submitted:", self.name_box.text, self.email_box.text)
+                self.visible = False
+
+    def draw(self):
+        if not self.visible:
+            return
+
+        pygame.draw.rect(self.surface, (30, 30, 30), self.rect, border_radius=10)
+        pygame.draw.rect(self.surface, (200, 200, 200), self.rect, 2, border_radius=10)
+
+        name_lbl = self.label_font.render("Name:", True, (255, 255, 255))
+        email_lbl = self.label_font.render("Email:", True, (255, 255, 255))
+
+        self.surface.blit(name_lbl, (self.name_label_rect.right - name_lbl.get_width() - 5, 
+                                   self.name_label_rect.y + 8))
+        self.surface.blit(email_lbl, (self.email_label_rect.right - email_lbl.get_width() - 5, 
+                                    self.email_label_rect.y + 8))
+
+        self.name_box.draw(self.surface)
+        self.email_box.draw(self.surface)
+
+        pygame.draw.rect(self.surface, (50, 150, 255), self.enter_btn, border_radius=6)
+        enter_lbl = self.font.render("Enter", True, (255, 255, 255))
+        self.surface.blit(
+            enter_lbl,
+            (self.enter_btn.centerx - enter_lbl.get_width() // 2,
+             self.enter_btn.centery - enter_lbl.get_height() // 2)
+        )
 
 class ArrowButton:
     def __init__(self, position, image_path):
@@ -1266,6 +1791,7 @@ class GoogleLeaderboard:
     async def send_score(self, name: str, email: str, score: int):
         if IS_WEB:
             try: 
+                """
                 from js import eval as js_eval
                 snippet = f'''
                     fetch(
@@ -1284,12 +1810,44 @@ class GoogleLeaderboard:
                 print("Error: {e}", e)
                 from js import console
                 console.log("fail")
-                console.log(str(e))                                
+                console.log(str(e))   
+                """
+                
+                new_data = {"name": name, "score": score, "email": email, "ts": 1758698161}
+                   
+                with open('leaderboard.json', 'r') as leaderboard_file:
+                    data = json.load(leaderboard_file)
+                data['results'].insert(0, new_data)
+
+                with open('leaderboard.json', 'w') as leaderboard_file:
+
+                    print(f"Writing data not web: {data}")
+                    json.dump(data, leaderboard_file)           
+                leaderboard_file.close()
+            except Exception as e:
+                print("❌ Failed to send score:", e)
+
         else:
+            """
             import requests
             try:
                 res = requests.post(self.script_url, json={"name": name, "email": email, "score": score})
                 print("✅ Score submitted" if res.status_code == 200 else f"⚠️ Error: {res.status_code}")
+            """
+
+            try:
+                new_data = {"name": name, "score": score, "email": email, "ts": 1758698161}
+                   
+                with open('leaderboard.json', 'r') as leaderboard_file:
+                    data = json.load(leaderboard_file)
+                data['results'].insert(0, new_data)
+
+                with open('leaderboard.json', 'w') as leaderboard_file:
+
+                    print(f"Writing data not web: {data}")
+                    json.dump(data, leaderboard_file)           
+                leaderboard_file.close()
+
             except Exception as e:
                 print("❌ Failed to send score:", e)
     
@@ -1316,7 +1874,8 @@ class GoogleLeaderboard:
             rows.sort(key=lambda r: int(r[3]), reverse=True)
             return rows[:10]
             """
-                with open('https://github.com/yuliaem/yuliaem.github.io/blob/main/pacman_th2/leaderboard.json', 'r') as leaderboard_file:
+                """
+                with open('leaderboard.json', 'r') as leaderboard_file:
                     rows = []
                     data = json.load(leaderboard_file)
                     for row in data:
@@ -1324,7 +1883,19 @@ class GoogleLeaderboard:
                     return rows[:10]
             except Exception as e:
                 print("Error: {e}", e)
+                """
 
+                with open('leaderboard.json', 'r') as leaderboard_file:
+                    print("Reading file...")
+                    rows = []
+                    data = json.load(leaderboard_file)
+                    for row in data["results"]:
+                        rows.append([row["name"], row["score"], row["email"], row["ts"]])
+                    return rows[:10]                
+                
+            except Exception as e:
+                print(f"Error: {e}")
+                return []
         else:
             """
             import requests
@@ -1342,25 +1913,48 @@ class GoogleLeaderboard:
                 print("❌ Failed to fetch leaderboard:", e)
                 return []
                 """
-            #try:
-            from urllib.request import urlopen
             
-            
-            url = "https://drive.google.com/file/d/1MYH0JHLIYfXu0BhunCxuzyb4P2Tscjwu/view?usp=drive_link"
-            output = json.load(urlopen(url))
-            for row in data:
-                rows.append([row["ts"], row["name"], row["email"], row["score"]])
-            return rows[:10]
             """
-                with open('', 'r') as leaderboard_file:
+            try:
+                with open('./build/web/leaderboard.json', 'r') as leaderboard_file:
                     rows = []
                     data = json.load(leaderboard_file)
                     for row in data:
                         rows.append([row["ts"], row["name"], row["email"], row["score"]])
                     return rows[:10]
-                    """
-            #except Exception as e:
-             #   print("Error: {e}", e)
+            except Exception as e:
+                print("Error: {e}", e)
+            """
+
+            """
+
+            import requests
+            try:
+                file_url = "https://drive.google.com/uc?export=download&id=1MYH0JHLIYfXu0BhunCxuzyb4P2Tscjwu"
+                response = requests.get(file_url)
+                
+                if response.status_code == 200:
+                    data = json.loads(response.text)
+                    rows = []
+                    for row in data:
+                        rows.append([row["ts"], row["name"], row["email"], row["score"]])
+                    return rows[:10]
+                else:
+                    print(f"Error: {response.status_code}")
+                    return []
+            """
+            try:
+                with open('leaderboard.json', 'r') as leaderboard_file:
+                    print("Reading NOT WEB...")
+                    rows = []
+                    data = json.load(leaderboard_file)
+                    for row in data["results"]:
+                        rows.append([row["name"], row["score"], row["email"], row["ts"]])
+                    return rows[:10]
+                                    
+            except Exception as e:
+                print(f"Error: {e}")
+                return []
 
 class LeaderboardView:
     def __init__(self, leaderboard, surface, close_img):
@@ -1390,7 +1984,6 @@ class LeaderboardView:
         self.entries = []
         self.loading = True
         self.visible = True
-        # запускаем асинхронный таск вместо потока
         asyncio.create_task(self._fetch_data())
 
     async def _fetch_data(self):
@@ -1414,7 +2007,7 @@ class LeaderboardView:
             self.surface.blit(loading_text, (self.rect.centerx - loading_text.get_width() // 2, y))
         else:
             for i, row in enumerate(self.entries):
-                name, email, score = row[1], row[2], row[3]
+                name, score, email = row[0], row[1], row[2]
                 text = self.font.render(f"{i+1:>2}. {name:<12} {score:>5}", True, self.score_color)
                 self.surface.blit(text, (self.rect.left + 30, y))
                 y += row_height
@@ -1447,7 +2040,10 @@ class GameController(object):
         self.fruitNode = None
         self.mazedata = MazeData()
         
-        # UI
+        self.player_name = ""
+        self.player_email = ""
+        self.startup_screen = StartupScreen(self.screen)
+        
         self.leaderboard_btn_img = pygame.image.load("btn_leaderboard.png").convert_alpha()
         self.close_btn_img = pygame.image.load("btn_close.png").convert_alpha()
         btn_y = 5 * TILEHEIGHT // 4 - self.leaderboard_btn_img.get_height() // 2
@@ -1466,51 +2062,10 @@ class GameController(object):
         button_pause = ArrowButton((SCREENWIDTH//2 - 3 * ARROW_SIZE, SCREENHEIGHT + 2 * ARROW_SIZE), 'button_pause.png')
         button_start = ArrowButton((SCREENWIDTH//2 - 3 * ARROW_SIZE, SCREENHEIGHT + 2 * ARROW_SIZE), 'button_start.png')
 
-        self.arrows = [button_up, button_down, button_left, button_right, button_pause, button_start]  
+        self.arrows = [button_up, button_down, button_left, button_right, button_pause, button_start]
+        
+        self.game_started = False
     
-        self.input_active = False
-        self.name_box = InputBox(SCREENWIDTH//2 - 150, SCREENHEIGHT//2 - 60, 300, 40)
-        self.email_box = InputBox(SCREENWIDTH//2 - 150, SCREENHEIGHT//2, 300, 40)
-        self.submit_pressed = False
-
-    def draw_input_form(self):
-        # Dark background overlay
-        overlay = pygame.Surface(SCREENSIZE)
-        overlay.set_alpha(180)
-        overlay.fill((0, 0, 0))
-        self.screen.blit(overlay, (0, 0))
-
-        # Draw input boxes
-        self.name_box.draw(self.screen)
-        self.email_box.draw(self.screen)
-
-        # Draw labels
-        font = pygame.font.Font("PressStart2P-Regular.ttf", 20)
-        name_lbl = font.render("Name:", True, (255, 255, 255))
-        email_lbl = font.render("Email:", True, (255, 255, 255))
-        self.screen.blit(name_lbl, (self.name_box.rect.x, self.name_box.rect.y - 30))
-        self.screen.blit(email_lbl, (self.email_box.rect.x, self.email_box.rect.y - 30))
-
-        submit_lbl = font.render("Press ENTER in Email box to Submit", True, (255, 255, 0))
-        self.screen.blit(submit_lbl, (SCREENWIDTH//2 - submit_lbl.get_width()//2, self.email_box.rect.y + 60))
-
-    def checkEvents(self):
-        for event in pygame.event.get():
-            if event.type == QUIT:
-                exit()
-
-            if self.input_active:
-                name_val = self.name_box.handle_event(event)
-                email_val = self.email_box.handle_event(event)
-                if email_val is not None and self.name_box.text and self.email_box.text:
-                    # submit
-                    asyncio.create_task(
-                        self.glb.send_score(self.name_box.text, self.email_box.text, self.score)
-                    )
-                    print("Submitted:", self.name_box.text, self.email_box.text, self.score)
-                    self.input_active = False
-                return  # skip normal events when input is active
-
     def change_direction(self, dir):
         self.pacman.direction = dir
 
@@ -1524,7 +2079,8 @@ class GameController(object):
         self.flashBG = False
         self.background = self.background_norm
 
-    def startGame(self):      
+    def startGame(self):    
+
         self.mazedata.loadMaze(self.level)
         self.mazesprites = MazeSprites(self.mazedata.obj.name+".txt", self.mazedata.obj.name+"_rotation.txt")
         self.setBackground()
@@ -1613,6 +2169,15 @@ class GameController(object):
         for event in pygame.event.get():
             if event.type == QUIT:
                 exit()
+            
+            if not self.game_started:
+                player_data = self.startup_screen.handle_event(event)
+                if player_data:
+                    self.player_name = player_data["name"]
+                    self.player_email = player_data["email"]
+                    self.game_started = True
+                    print(f"🎮 Player: {self.player_name}, Email: {self.player_email}")
+                continue  
 
             elif event.type == MOUSEBUTTONDOWN:
                 pos = event.pos
@@ -1695,16 +2260,12 @@ class GameController(object):
                             self.textgroup.showText(GAMEOVERTXT)
                             self.pause.setPause(pauseTime=3, func=self.restartGame)
 
-                            
-                            player_name = 'Pacman th2'
-                            player_email = 'pacman_th2@gmail.com'
+                            player_name = self.player_name
+                            player_email = self.player_email
                             player_score = self.score
-                            print("Score is sending...")
                             asyncio.create_task(
                                 self.glb.send_score(player_name, player_email, player_score)
                             )
-                            
-                            #self.input_active = True
 
                         else:
                             self.pause.setPause(pauseTime=3, func=self.resetLevel)
@@ -1776,6 +2337,12 @@ class GameController(object):
     def render(self):
         self.screen.blit(self.background, (0, 0))
         #self.nodes.render(self.screen)
+
+        if not self.game_started:
+            self.startup_screen.draw()
+            pygame.display.update()
+            return
+    
         self.pellets.render(self.screen)
         if self.fruit is not None:
             self.fruit.render(self.screen)
@@ -1802,10 +2369,6 @@ class GameController(object):
 
         if self.lb_view.visible:
             self.lb_view.draw()
-        
-        if self.input_active:
-            self.draw_input_form()
-            pygame.display.flip()
 
         pygame.display.update()
 
